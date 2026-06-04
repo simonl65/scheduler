@@ -1,8 +1,6 @@
 import sys
 from unittest.mock import MagicMock
 
-from scheduler import Task, run
-
 # Mock MicroPython modules before importing scheduler
 mock_utime = MagicMock()
 mock_machine = MagicMock()
@@ -24,6 +22,8 @@ mock_utime.ticks_diff = mock_ticks_diff
 
 sys.modules["utime"] = mock_utime
 sys.modules["machine"] = mock_machine
+
+from scheduler import Task, run  # noqa: E402
 
 
 def test_task_init():
