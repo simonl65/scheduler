@@ -1,1 +1,2 @@
-from .scheduler import Task, run
+from .scheduler import Task as Task
+from .scheduler import run as run

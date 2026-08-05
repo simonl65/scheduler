@@ -3,7 +3,6 @@ Basic example usage of the cooperative scheduler module.
 """
 
 from machine import Pin  # type: ignore
-
 from scheduler.scheduler import Task, run
 
 led = Pin("LED", Pin.OUT)
@@ -62,10 +61,18 @@ if __name__ == "__main__":
     try:
         init()
 
+        # Build the generator once, outside the loop -- constructing a fresh
+        # generator per iteration works (task timing lives on the Task
+        # objects) but allocates needlessly every round.
+        scheduler = run(tasks, light_sleep=True)
+
         while True:
-            # Run the generator-based scheduler loop
-            # light_sleep=True saves power by sleeping when there are no tasks due.
-            next(run(tasks, light_sleep=True))
+            # Advance one round. light_sleep=True saves power by sleeping
+            # when there are no tasks due -- do not enable this on a device
+            # that services a UART (or other peripheral) outside of a Task
+            # callback; lightsleep() stops responding to it for the sleep
+            # duration and bytes arriving during it are lost.
+            next(scheduler)
 
     except KeyboardInterrupt:
         safe_shutdown()
