@@ -54,10 +54,24 @@ tasks = [
     Task(task_sensor, interval_ms=500),
 ]
 
-# Run the scheduler
-# Setting light_sleep=True will sleep between task rounds to save power
+# Build the generator once, outside the loop.
+# Setting light_sleep=True will sleep between task rounds to save power.
 scheduler = run(tasks, light_sleep=True)
 
 while True:
     next(scheduler)
 ```
+
+A task's exception is isolated by default -- caught and stashed on
+`task.last_exception` so one failing callback doesn't stop the round or later
+tasks in it. Pass `Task(..., isolate_errors=False)` for a task whose failure
+must propagate and stop the loop instead.
+
+### `light_sleep` caveat
+
+`light_sleep=True` calls `machine.lightsleep()` between rounds, which stops
+the device responding to *everything* outside of a `Task` callback for up to
+the soonest task's remaining interval -- including any UART, SPI, or other
+peripheral serviced by application code between `next(scheduler)` calls.
+Bytes arriving during the sleep are lost with no indication to the caller.
+Only enable it on a device where all I/O happens inside `Task` callbacks.

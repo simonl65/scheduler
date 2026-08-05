@@ -1,95 +1,228 @@
+import importlib
 import sys
-from unittest.mock import MagicMock
+import types
 
-# Mock MicroPython modules before importing scheduler
-mock_utime = MagicMock()
-mock_machine = MagicMock()
+import pytest
 
-# Setup default behaviors for ticks_diff and ticks_ms
-current_time_ms = 0
+TICKS_PERIOD = 2**30
 
 
-def mock_ticks_ms():
-    return current_time_ms
+class FakeUtime:
+    """Minimal ticks_ms()/ticks_diff() double with real wraparound math,
+    matching MicroPython's rp2 ticks period. `now` is set directly by
+    tests rather than advancing with wall-clock time."""
+
+    def __init__(self):
+        self.now = 0
+
+    def ticks_ms(self):
+        return self.now
+
+    def ticks_diff(self, a, b):
+        diff = (a - b) & (TICKS_PERIOD - 1)
+        if diff >= TICKS_PERIOD // 2:
+            diff -= TICKS_PERIOD
+        return diff
 
 
-def mock_ticks_diff(t1, t2):
-    return t1 - t2
+@pytest.fixture
+def fake_utime(monkeypatch):
+    fake = FakeUtime()
+    monkeypatch.setitem(sys.modules, "utime", fake)
+    return fake
 
 
-mock_utime.ticks_ms = mock_ticks_ms
-mock_utime.ticks_diff = mock_ticks_diff
+@pytest.fixture
+def scheduler_module(fake_utime, monkeypatch):
+    # `pythonpath = ["scheduler"]` (see pyproject.toml) puts the package
+    # directory itself on sys.path, so `import scheduler` resolves directly
+    # to scheduler/scheduler.py rather than the package's __init__.py.
+    monkeypatch.delitem(sys.modules, "machine", raising=False)
+    monkeypatch.delitem(sys.modules, "scheduler", raising=False)
+    import scheduler as module
 
-sys.modules["utime"] = mock_utime
-sys.modules["machine"] = mock_machine
-
-from scheduler import Task, run  # noqa: E402
-
-
-def test_task_init():
-    task_func = MagicMock()
-    task = Task(task_func, interval_ms=100)
-    assert task.task_to_run == task_func
-    assert task.interval_ms == 100
-    assert task.last_ms == 0
+    return importlib.reload(module)
 
 
-def test_scheduler_runs_due_tasks():
-    global current_time_ms
-    current_time_ms = 0
+def test_task_does_not_fire_before_due(scheduler_module, fake_utime):
+    calls = []
+    fake_utime.now = 0
+    task = scheduler_module.Task(lambda: calls.append("a"), interval_ms=10)
+    fake_utime.now = 9
 
-    task_func1 = MagicMock()
-    task_func2 = MagicMock()
+    next(scheduler_module.run([task]))
 
-    task1 = Task(task_func1, interval_ms=100)
-    task2 = Task(task_func2, interval_ms=200)
+    assert calls == []
 
-    scheduler = run([task1, task2])
 
-    # First tick at 0 ms: since last_ms is 0, ticks_diff(0, 0) is 0.
-    # task1: interval 100, ticks_diff(0, 0) = 0 < 100 -> not run
-    # task2: interval 200, ticks_diff(0, 0) = 0 < 200 -> not run
+def test_task_fires_when_due(scheduler_module, fake_utime):
+    calls = []
+    fake_utime.now = 0
+    task = scheduler_module.Task(lambda: calls.append("a"), interval_ms=10)
+    fake_utime.now = 10
+
+    next(scheduler_module.run([task]))
+
+    assert calls == ["a"]
+
+
+def test_tasks_run_in_declared_list_order(scheduler_module, fake_utime):
+    calls = []
+    fake_utime.now = 0
+    tasks = [
+        scheduler_module.Task(lambda i=i: calls.append(i), interval_ms=0)
+        for i in range(3)
+    ]
+
+    next(scheduler_module.run(tasks))
+
+    assert calls == [0, 1, 2]
+
+
+def test_interval_zero_runs_every_round(scheduler_module, fake_utime):
+    calls = []
+    fake_utime.now = 0
+    task = scheduler_module.Task(lambda: calls.append("a"), interval_ms=0)
+    scheduler = scheduler_module.run([task])
+
     next(scheduler)
-    task_func1.assert_not_called()
-    task_func2.assert_not_called()
-
-    # Advance time to 100 ms
-    current_time_ms = 100
+    fake_utime.now = 1
     next(scheduler)
-    task_func1.assert_called_once()
-    task_func2.assert_not_called()
-
-    # Reset call counts
-    task_func1.reset_mock()
-
-    # Advance time to 150 ms
-    current_time_ms = 150
-    next(scheduler)
-    task_func1.assert_not_called()
-    task_func2.assert_not_called()
-
-    # Advance time to 200 ms
-    current_time_ms = 200
-    next(scheduler)
-    # task1 last run was at 100ms, diff is 200 - 100 = 100 >= 100 -> runs again
-    # task2 last run was at 0ms, diff is 200 - 0 = 200 >= 200 -> runs
-    task_func1.assert_called_once()
-    task_func2.assert_called_once()
-
-
-def test_scheduler_light_sleep():
-    global current_time_ms
-    current_time_ms = 0
-
-    task_func = MagicMock()
-    task = Task(task_func, interval_ms=150)
-
-    # run with light_sleep=True
-    scheduler = run([task], light_sleep=True)
-
-    mock_machine.lightsleep.reset_mock()
+    fake_utime.now = 1  # same tick again -- still due at interval_ms=0
     next(scheduler)
 
-    # min_sleep_ms is 1, task.interval_ms is 150. min of tasks intervals is 150.
-    # sleep_for should be max(1, 150) = 150.
-    mock_machine.lightsleep.assert_called_once_with(150)
+    assert calls == ["a", "a", "a"]
+
+
+def test_tick_wraparound_is_handled_via_ticks_diff(
+    scheduler_module, fake_utime
+):
+    calls = []
+    fake_utime.now = TICKS_PERIOD - 5
+    task = scheduler_module.Task(lambda: calls.append("a"), interval_ms=10)
+    # advance past the wraparound boundary by 12ms of real elapsed time
+    fake_utime.now = (TICKS_PERIOD - 5 + 12) % TICKS_PERIOD
+
+    next(scheduler_module.run([task]))
+
+    assert calls == ["a"]
+
+
+def test_overrun_coalesces_without_catch_up(scheduler_module, fake_utime):
+    calls = []
+    fake_utime.now = 0
+    task = scheduler_module.Task(lambda: calls.append("a"), interval_ms=10)
+    fake_utime.now = 100  # ten intervals overdue
+
+    next(scheduler_module.run([task]))
+
+    assert calls == ["a"]  # fires once, not ten times
+    assert task.last_ms == 100  # set to `now`, not last_ms + interval_ms
+
+
+def test_last_ms_defaults_to_ticks_ms_at_construction(
+    scheduler_module, fake_utime
+):
+    fake_utime.now = 42
+
+    task = scheduler_module.Task(lambda: None, interval_ms=10)
+
+    assert task.last_ms == 42  # not 0 -- a task built after uptime has
+    # advanced must not be treated as overdue since boot
+
+
+def test_last_ms_can_be_explicitly_set(scheduler_module, fake_utime):
+    fake_utime.now = 42
+
+    task = scheduler_module.Task(lambda: None, interval_ms=10, last_ms=7)
+
+    assert task.last_ms == 7
+
+
+def test_isolated_task_exception_does_not_propagate(
+    scheduler_module, fake_utime
+):
+    fake_utime.now = 0
+
+    def failing():
+        raise ValueError("sensor fault")
+
+    task = scheduler_module.Task(failing, interval_ms=0)
+
+    next(scheduler_module.run([task]))  # must not raise
+
+    assert isinstance(task.last_exception, ValueError)
+
+
+def test_isolation_does_not_block_later_tasks_in_the_same_round(
+    scheduler_module, fake_utime
+):
+    calls = []
+    fake_utime.now = 0
+
+    def failing():
+        raise ValueError("sensor fault")
+
+    failing_task = scheduler_module.Task(failing, interval_ms=0)
+    later_task = scheduler_module.Task(
+        lambda: calls.append("later"), interval_ms=0
+    )
+
+    next(scheduler_module.run([failing_task, later_task]))
+
+    assert calls == ["later"]
+
+
+def test_exempt_task_exception_propagates(scheduler_module, fake_utime):
+    fake_utime.now = 0
+
+    def failing():
+        raise ValueError("watchdog fault")
+
+    task = scheduler_module.Task(failing, interval_ms=0, isolate_errors=False)
+    scheduler = scheduler_module.run([task])
+
+    with pytest.raises(ValueError):
+        next(scheduler)
+
+
+def test_light_sleep_defaults_off_and_never_imports_machine(
+    scheduler_module, fake_utime
+):
+    fake_utime.now = 0
+    task = scheduler_module.Task(lambda: None, interval_ms=0)
+
+    next(scheduler_module.run([task]))  # must not raise ImportError
+
+    assert "machine" not in sys.modules
+
+
+def test_light_sleep_enabled_lazily_imports_and_calls_lightsleep(
+    scheduler_module, fake_utime, monkeypatch
+):
+    sleep_calls = []
+    fake_machine = types.SimpleNamespace(
+        lightsleep=lambda ms: sleep_calls.append(ms)
+    )
+    monkeypatch.setitem(sys.modules, "machine", fake_machine)
+    fake_utime.now = 0
+    task = scheduler_module.Task(lambda: None, interval_ms=50)
+
+    next(scheduler_module.run([task], light_sleep=True))
+
+    assert sleep_calls == [50]
+
+
+def test_run_is_a_generator_one_round_per_next_call(
+    scheduler_module, fake_utime
+):
+    calls = []
+    fake_utime.now = 0
+    task = scheduler_module.Task(lambda: calls.append("a"), interval_ms=0)
+    scheduler = scheduler_module.run([task])
+
+    assert calls == []  # constructing the generator runs no code yet
+    next(scheduler)
+    assert calls == ["a"]
+    next(scheduler)
+    assert calls == ["a", "a"]

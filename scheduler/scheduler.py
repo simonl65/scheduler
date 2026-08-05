@@ -8,51 +8,77 @@ Usage:
         Task(my_func, interval_ms=500),
         Task(another_func, interval_ms=100),
     ]
-    scheduler = run(tasks)                    # tight loop (default)
-    scheduler = run(tasks, light_sleep=True)  # sleep between rounds to save power
+    scheduler = run(tasks)  # build the generator once, outside the loop
 
     while True:
         next(scheduler)  # advance one round; add per-round logic here if needed
+
+`run` is a generator yielding once per round. Each round takes a single
+`ticks_ms()` snapshot, walks `tasks` in list order, and for every task where
+`ticks_diff(now, task.last_ms) >= task.interval_ms` sets `task.last_ms = now`
+and calls the callback. There is no priority beyond list order, no catch-up,
+and no way to add or remove tasks after construction.
+
+A task's own exception is isolated by default (caught and stashed on
+`task.last_exception`) so one failing callback does not stop the round or
+later tasks in it; pass `isolate_errors=False` for a task whose failure must
+propagate and end the loop instead.
+
+`light_sleep=True` sleeps between rounds (`machine.lightsleep()`) for up to
+the soonest task's remaining time, to save power. `machine` is imported
+lazily so nothing changes when this is left off (the default). Do not enable
+it on a device that services a UART (or any other peripheral) outside of a
+`Task` callback: `lightsleep()` stops responding to that peripheral for the
+duration of the sleep, and bytes arriving during it are lost with no
+indication to the caller.
 """
 
-from utime import ticks_diff, ticks_ms  # type: ignore
-
-MIN_SLEEP_MS = 1  # don't sleep for less than this; avoids overhead on very short gaps
+import utime as time  # type: ignore
 
 
 class Task:
-    def __init__(self, task_to_run, interval_ms, last_ms=0):
+    def __init__(
+        self, task_to_run, interval_ms, last_ms=None, isolate_errors=True
+    ):
         self.task_to_run = task_to_run
         self.interval_ms = interval_ms
-        self.last_ms = last_ms
+        self.last_ms = time.ticks_ms() if last_ms is None else last_ms
+        self.isolate_errors = isolate_errors
+        self.last_exception = None
+
+    def _fire(self, now):
+        self.last_ms = now
+        if self.isolate_errors:
+            try:
+                self.task_to_run()
+            except Exception as ex:  # noqa: S110 -- isolation is the point
+                self.last_exception = ex
+        else:
+            self.task_to_run()
 
 
-def run(tasks, light_sleep=False, min_sleep_ms=MIN_SLEEP_MS):
-    """
-    Generator-based scheduler. Yields after each round so the caller controls
-    the loop via next().
+def _ms_until_next_due(tasks, now):
+    soonest = None
+    for task in tasks:
+        remaining = task.interval_ms - time.ticks_diff(now, task.last_ms)
+        if soonest is None or remaining < soonest:
+            soonest = remaining
+    return max(soonest, 0) if soonest is not None else 0
 
-    tasks        -- list of Task objects
-    light_sleep  -- if True, sleep between rounds using machine.lightsleep()
-                    to reduce power consumption (default: False)
-    min_sleep_ms -- minimum gap worth sleeping; shorter gaps use a tight loop
-                    (default: MIN_SLEEP_MS)
-    """
+
+def run(tasks, light_sleep=False):
+    """Generator yielding once per round. Build once, outside the loop."""
+    lightsleep_fn = None
     if light_sleep:
-        import machine  # type: ignore  # imported lazily; only needed when sleep is enabled
+        import machine  # type: ignore
 
-        # The shortest interval is the scheduler tick rate — sleep no longer than this.
-        sleep_for = max(min_sleep_ms, min(task.interval_ms for task in tasks))
+        lightsleep_fn = machine.lightsleep
 
     while True:
-        now = ticks_ms()
-
+        now = time.ticks_ms()
         for task in tasks:
-            if ticks_diff(now, task.last_ms) >= task.interval_ms:
-                task.last_ms = now
-                task.task_to_run()
-
-        if light_sleep:
-            machine.lightsleep(sleep_for)
-
+            if time.ticks_diff(now, task.last_ms) >= task.interval_ms:
+                task._fire(now)
+        if lightsleep_fn is not None:
+            lightsleep_fn(_ms_until_next_due(tasks, now))
         yield
