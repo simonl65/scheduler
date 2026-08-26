@@ -1,6 +1,6 @@
 [project]
 name = "mpy-scheduler"
-version = "1.2.2"
+version = "1.2.3"
 description = "Cooperative scheduler module for MicroPython."
 readme = "README.md"
 license = "SUL-1.0"
