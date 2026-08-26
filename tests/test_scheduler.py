@@ -154,6 +154,27 @@ def test_isolated_task_exception_does_not_propagate(
     assert isinstance(task.last_exception, ValueError)
 
 
+def test_interval_ms_is_read_once_per_round_even_if_task_mutates_it(
+    scheduler_module, fake_utime
+):
+    """A performance change (hoisting task.interval_ms into a local, read
+    once per task per round rather than twice) tightens an already-documented
+    contract: intervals are fixed at construction (I-13 in the consuming
+    project), so a callback that mutates its own task.interval_ms mid-round
+    must not change whether *that same round* counts as periodic. Discriminates
+    the old code (re-reads task.interval_ms after firing) from the new: under
+    the old code this task's mutated interval_ms=0 would exclude it from the
+    count, yielding 0."""
+    fake_utime.now = 0
+    task = scheduler_module.Task(lambda: None, interval_ms=10)
+    task.task_to_run = lambda: setattr(task, "interval_ms", 0)
+    fake_utime.now = 10
+
+    round_count = next(scheduler_module.run([task]))
+
+    assert round_count == 1
+
+
 def test_isolation_does_not_block_later_tasks_in_the_same_round(
     scheduler_module, fake_utime
 ):
