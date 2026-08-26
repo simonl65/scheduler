@@ -226,3 +226,39 @@ def test_run_is_a_generator_one_round_per_next_call(
     assert calls == ["a"]
     next(scheduler)
     assert calls == ["a", "a"]
+
+
+def test_yield_counts_only_periodic_fires_not_interval_zero(
+    scheduler_module, fake_utime
+):
+    fake_utime.now = 0
+    always_on = scheduler_module.Task(lambda: None, interval_ms=0)
+    scheduler = scheduler_module.run([always_on])
+
+    round_count = next(scheduler)
+
+    assert round_count == 0  # interval_ms=0 fires every round but carries
+    # no information about whether the round was "busy"
+
+
+def test_yield_counts_a_periodic_task_that_fired(scheduler_module, fake_utime):
+    fake_utime.now = 0
+    periodic = scheduler_module.Task(lambda: None, interval_ms=10)
+    fake_utime.now = 10
+    scheduler = scheduler_module.run([periodic])
+
+    round_count = next(scheduler)
+
+    assert round_count >= 1
+
+
+def test_bare_next_caller_still_works_ignoring_the_yield_value(
+    scheduler_module, fake_utime
+):
+    calls = []
+    fake_utime.now = 0
+    task = scheduler_module.Task(lambda: calls.append("a"), interval_ms=0)
+
+    next(scheduler_module.run([task]))  # must not raise despite new yield value
+
+    assert calls == ["a"]

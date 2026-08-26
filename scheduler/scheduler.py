@@ -19,6 +19,13 @@ Usage:
 and calls the callback. There is no priority beyond list order, no catch-up,
 and no way to add or remove tasks after construction.
 
+Each round yields the number of tasks that fired with `interval_ms > 0`.
+Tasks with `interval_ms == 0` fire unconditionally every round and so are
+excluded from the count -- it exists to let a caller ask "was anything
+actually due this round", which an `interval_ms == 0` task can never answer.
+Existing callers that ignore the yielded value (`next(scheduler)`) are
+unaffected.
+
 A task's own exception is isolated by default (caught and stashed on
 `task.last_exception`) so one failing callback does not stop the round or
 later tasks in it; pass `isolate_errors=False` for a task whose failure must
@@ -76,9 +83,12 @@ def run(tasks, light_sleep=False):
 
     while True:
         now = time.ticks_ms()
+        periodic_fired = 0
         for task in tasks:
             if time.ticks_diff(now, task.last_ms) >= task.interval_ms:
                 task._fire(now)
+                if task.interval_ms > 0:
+                    periodic_fired += 1
         if lightsleep_fn is not None:
             lightsleep_fn(_ms_until_next_due(tasks, now))
-        yield
+        yield periodic_fired

@@ -1,6 +1,6 @@
 [project]
 name = "micropython-scheduler"
-version = "1.1.0"
+version = "1.2.0"
 description = "Cooperative scheduler module for MicroPython."
 license = "SUL-1.0"
 license-files = [ "LICENSE.md" ]
