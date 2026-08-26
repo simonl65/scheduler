@@ -1,7 +1,8 @@
 [project]
-name = "micropython-scheduler"
+name = "mpy-scheduler"
 version = "1.2.2"
 description = "Cooperative scheduler module for MicroPython."
+readme = "README.md"
 license = "SUL-1.0"
 license-files = [ "LICENSE.md" ]
 authors = [
