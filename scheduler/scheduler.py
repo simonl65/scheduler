@@ -43,7 +43,36 @@ duration of the sleep, and bytes arriving during it are lost with no
 indication to the caller.
 """
 
-import utime as time  # type: ignore
+try:
+    import utime as time  # type: ignore
+except ImportError:  # plain CPython (e.g. `pip install` off-device) has no
+    # utime module. This package is MicroPython-only in what it *does* --
+    # `run()` genuinely needs real ticks_ms()/ticks_diff() semantics, which
+    # this stub deliberately does not provide -- but it must still be
+    # *importable* under CPython, or every install off a MicroPython device
+    # (host tooling, CI, `pip install micropython-scheduler` to read the
+    # source) breaks at `import scheduler` before any test's own utime
+    # double (see tests/test_scheduler.py's FakeUtime) gets a chance to run.
+    # Raises loudly on actual use rather than silently returning wrong
+    # values, same reasoning as any stub standing in for hardware-only
+    # behaviour.
+
+    class _CPythonTimeStub:
+        @staticmethod
+        def ticks_ms():
+            raise NotImplementedError(
+                "utime.ticks_ms is MicroPython-only; inject a fake utime "
+                "into sys.modules before import for host testing"
+            )
+
+        @staticmethod
+        def ticks_diff(a, b):
+            raise NotImplementedError(
+                "utime.ticks_diff is MicroPython-only; inject a fake utime "
+                "into sys.modules before import for host testing"
+            )
+
+    time = _CPythonTimeStub()
 
 
 class Task:

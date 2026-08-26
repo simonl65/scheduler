@@ -234,6 +234,25 @@ def test_light_sleep_enabled_lazily_imports_and_calls_lightsleep(
     assert sleep_calls == [50]
 
 
+def test_module_imports_under_plain_cpython_with_no_utime_shim(monkeypatch):
+    """Every other test uses the `scheduler_module` fixture, which always
+    injects a fake `utime` into `sys.modules` before import (via
+    `fake_utime`) -- none of them exercise the real off-device import path.
+    This is the one test proving `import scheduler` itself does not require
+    a MicroPython environment or a pre-injected shim, e.g. `pip install
+    micropython-scheduler` under plain CPython."""
+    monkeypatch.delitem(sys.modules, "utime", raising=False)
+    monkeypatch.delitem(sys.modules, "machine", raising=False)
+    monkeypatch.delitem(sys.modules, "scheduler", raising=False)
+
+    import scheduler as module
+
+    module = importlib.reload(module)
+
+    with pytest.raises(NotImplementedError):
+        module.time.ticks_ms()
+
+
 def test_run_is_a_generator_one_round_per_next_call(
     scheduler_module, fake_utime
 ):
